@@ -1,80 +1,67 @@
-name: Check step 3, Spin up environment
+name: Configure Azure environment
 
-# This step sets STEP to 4
-# This step closes <details id=3> and opens <details id=4>
-
-# This will run after the "Configure Azure environment" workflow
-# completes on the azure-configuration branch
-# Reference https://docs.github.com/en/actions/learn-github-actions/events-that-trigger-workflows
 on:
-  workflow_dispatch:
-  workflow_run:
-    workflows: ["Configure Azure environment"]
-    types: [completed]
-    branches: [azure-configuration]
+  pull_request:
+    types: [labeled]
 
-permissions:
-  # Need `contents: read` to checkout the repository
-  # Need `contents: write` to update the step metadata
-  contents: write
-  pull-requests: write
+env:
+  IMAGE_REGISTRY_URL: ghcr.io
+  AZURE_RESOURCE_GROUP: cd-with-actions
+  AZURE_APP_PLAN: actions-ttt-deployment
+  AZURE_LOCATION: '"Central US"'
+  ###############################################
+  ### Replace <username> with GitHub username ###
+  ###############################################
+  AZURE_WEBAPP_NAME: <username>-ttt-app
 
 jobs:
-  # Get the current step from .github/script/STEP so we can
-  # limit running the main job when the learner is on the same step.
-  get_current_step:
-    name: Check current step number
+  setup-up-azure-resources:
     runs-on: ubuntu-latest
+    if: contains(github.event.pull_request.labels.*.name, 'spin up environment')
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v3
-      - id: get_step
+
+      - name: Azure login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Create Azure resource group
+        if: success()
         run: |
-          echo "current_step=$(cat ./.github/script/STEP)" >> $GITHUB_OUTPUT
-    outputs:
-      current_step: ${{ steps.get_step.outputs.current_step }}
+          az group create --location ${{env.AZURE_LOCATION}} --name ${{env.AZURE_RESOURCE_GROUP}} --subscription ${{secrets.AZURE_SUBSCRIPTION_ID}}
 
-  on_push:
-    name: On push to azure-configuration
-    needs: get_current_step
+      - name: Create Azure app service plan
+        if: success()
+        run: |
+          az appservice plan create --resource-group ${{env.AZURE_RESOURCE_GROUP}} --name ${{env.AZURE_APP_PLAN}} --is-linux --sku F1 --subscription ${{secrets.AZURE_SUBSCRIPTION_ID}}
 
-    # We will only run this action when:
-    # 1. This repository isn't the template repository
-    # 2. The STEP is currently 3
-    # Reference https://docs.github.com/en/actions/learn-github-actions/contexts
-    # Reference https://docs.github.com/en/actions/learn-github-actions/expressions
-    if: >-
-      ${{ !github.event.repository.is_template
-          && needs.get_current_step.outputs.current_step == 3 }}
+      - name: Create webapp resource
+        if: success()
+        run: |
+          az webapp create --resource-group ${{ env.AZURE_RESOURCE_GROUP }} --plan ${{ env.AZURE_APP_PLAN }} --name ${{ env.AZURE_WEBAPP_NAME }}  --deployment-container-image-name nginx --subscription ${{secrets.AZURE_SUBSCRIPTION_ID}}
 
-    # We'll run Ubuntu for performance instead of Mac or Windows
+      - name: Configure webapp to use GHCR
+        if: success()
+        run: |
+          az webapp config container set --docker-custom-image-name nginx --docker-registry-server-password ${{secrets.CR_PAT}} --docker-registry-server-url https://${{env.IMAGE_REGISTRY_URL}} --docker-registry-server-user ${{github.actor}} --name ${{ env.AZURE_WEBAPP_NAME }} --resource-group ${{ env.AZURE_RESOURCE_GROUP }} --subscription ${{secrets.AZURE_SUBSCRIPTION_ID}}
+
+  destroy-azure-resources:
     runs-on: ubuntu-latest
 
+    if: contains(github.event.pull_request.labels.*.name, 'destroy environment')
+
     steps:
-      # We'll need to check out the repository so that we can edit the README
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v3
-        with:
-          fetch-depth: 0 # Let's get all the branches
 
-      # Merge the pull open pull request
-      - name: Merge Pull Request
-        run: gh pr merge --squash azure-configuration
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      
-      # Pull main
-      - name: Pull main
-        run: ./.github/script/pull-main.sh
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # Update README to close <details id=3> and open <details id=4>
-      # and set STEP to '4'
-      - name: Update to step 4
-        uses: skills/action-update-step@v1
+      - name: Azure login
+        uses: azure/login@v1
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          from_step: 3
-          to_step: 4
-          branch_name: azure-configuration
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Destroy Azure environment
+        if: success()
+        run: |
+          az group delete --name ${{env.AZURE_RESOURCE_GROUP}} --subscription ${{secrets.AZURE_SUBSCRIPTION_ID}} --yes
